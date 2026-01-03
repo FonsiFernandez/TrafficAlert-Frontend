@@ -11,14 +11,79 @@ import {
 } from "react-native";
 import * as Location from "expo-location";
 import { Audio } from "expo-av";
-
 import * as Device from "expo-device";
-import Constants from "expo-constants";
+
+type AlertEvent = {
+  id: string;
+  type: string;
+
+  title?: string;
+  cause?: string;
+
+  road?: string;
+  pkText?: string;
+  pkKm?: number;
+
+  direction?: string;
+  orientation?: string;
+
+  province?: string;
+  municipality?: string;
+
+  startTime?: string;
+  source?: string;
+
+  lat: number;
+  lon: number;
+  severity?: number;
+};
 
 type AlertHit = {
-  event: { id: string; title: string };
+  event: AlertEvent;
   distanceMeters: number;
 };
+
+function getBackendBaseUrl() {
+  const envUrl = process.env.EXPO_PUBLIC_API_URL;
+  if (envUrl) return envUrl;
+
+  if (Platform.OS === "web") {
+    return "http://localhost:8080/api";
+  }
+
+  if (Platform.OS === "android" && !Device.isDevice) {
+    return "http://10.0.2.2:8080/api";
+  }
+
+  if (Platform.OS === "ios" && !Device.isDevice) {
+    return "http://localhost:8080/api";
+  }
+
+  // móvil físico: IP de tu PC en la misma WiFi
+  return "http://192.168.1.40:8080/api";
+}
+
+const BACKEND_BASE_URL = getBackendBaseUrl();
+
+function Field({
+  label,
+  value,
+  textColor,
+  mutedColor,
+}: {
+  label: string;
+  value?: string | number | null;
+  textColor: string;
+  mutedColor: string;
+}) {
+  if (value === undefined || value === null || value === "") return null;
+  return (
+    <Text style={{ color: textColor, lineHeight: 20 }}>
+      <Text style={{ color: mutedColor, fontWeight: "800" }}>{label}: </Text>
+      {String(value)}
+    </Text>
+  );
+}
 
 export default function HomeScreen() {
   const scheme = useColorScheme();
@@ -27,16 +92,17 @@ export default function HomeScreen() {
 
   const [driving, setDriving] = useState(false);
   const [status, setStatus] = useState("Listo");
-  const [lastAlert, setLastAlert] = useState("-");
   const [busy, setBusy] = useState(false);
+
+  const [lastHit, setLastHit] = useState<AlertHit | null>(null);
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
 
   useEffect(() => {
     (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== "granted") {
+      const perm = await Location.requestForegroundPermissionsAsync();
+      if (perm.status !== "granted") {
         Alert.alert("Permiso requerido", "Sin ubicación no hay alertas.");
       }
       await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
@@ -56,7 +122,7 @@ export default function HomeScreen() {
       }
       await soundRef.current.replayAsync();
     } catch {
-      // Si falla el sonido, no nos venimos abajo. Solo es un MVP.
+      // MVP: si falla el sonido, seguimos
     }
   }
 
@@ -71,9 +137,8 @@ export default function HomeScreen() {
       const { latitude, longitude } = pos.coords;
 
       setStatus("Consultando incidencias…");
-      const res = await fetch(
-        `${BACKEND_BASE_URL}/alerts?lat=${latitude}&lon=${longitude}&radiusMeters=2000&demo=true`
-      );
+      const url = `${BACKEND_BASE_URL}/alerts?lat=${latitude}&lon=${longitude}&radiusMeters=2000`;
+      const res = await fetch(url);
 
       if (!res.ok) {
         setStatus(`Backend ${res.status}`);
@@ -83,47 +148,20 @@ export default function HomeScreen() {
       const hits = (await res.json()) as AlertHit[];
       if (!hits.length) {
         setStatus("Sin incidencias cercanas");
-        setLastAlert("-");
+        setLastHit(null);
         return;
       }
 
       const hit = hits[0];
-      const msg = `${hit.event.title} a ${(hit.distanceMeters / 1000).toFixed(
-        1
-      )} km`;
-
-      setLastAlert(msg);
+      setLastHit(hit);
       setStatus("ALERTA");
       await beep();
-    } catch {
+    } catch (e) {
       setStatus("Error consultando backend");
     } finally {
       setBusy(false);
     }
   }
-
-function getBackendBaseUrl() {
-  const envUrl = process.env.EXPO_PUBLIC_API_URL;
-  if (envUrl) return envUrl;
-
-  // ✅ WEB: si estás en tu ordenador, normalmente backend está en el mismo host
-  if (Platform.OS === "web") {
-    return "http://localhost:8080/api";
-  }
-
-  if (Platform.OS === "android" && !Device.isDevice) {
-    return "http://10.0.2.2:8080/api";
-  }
-
-  if (Platform.OS === "ios" && !Device.isDevice) {
-    return "http://localhost:8080/api";
-  }
-
-  return "http://192.168.1.40:8080/api";
-}
-
-const BACKEND_BASE_URL = getBackendBaseUrl();
-
 
   function startDriving() {
     setDriving(true);
@@ -145,7 +183,21 @@ const BACKEND_BASE_URL = getBackendBaseUrl();
       ? { backgroundColor: t.dangerBg, borderColor: t.dangerBorder }
       : { backgroundColor: t.pillBg, borderColor: t.border };
 
-  const pillTextStyle = status === "ALERTA" ? { color: t.dangerText } : { color: t.text };
+  const pillTextStyle =
+    status === "ALERTA" ? { color: t.dangerText } : { color: t.text };
+
+  const headline =
+    lastHit?.event?.title ??
+    (lastHit ? "Incidencia" : "—");
+
+  const subline =
+    lastHit
+      ? `${headline} (${lastHit.event.id}) a ${(lastHit.distanceMeters / 1000).toFixed(
+          1
+        )} km`
+      : "—";
+
+  const e = lastHit?.event;
 
   return (
     <View style={[styles.container, { backgroundColor: t.bg }]}>
@@ -169,6 +221,7 @@ const BACKEND_BASE_URL = getBackendBaseUrl();
         </View>
 
         <Text style={[styles.label, { color: t.muted }]}>Última alerta</Text>
+
         <Text
           style={[
             styles.alertText,
@@ -176,8 +229,51 @@ const BACKEND_BASE_URL = getBackendBaseUrl();
           ]}
           numberOfLines={2}
         >
-          {lastAlert}
+          {subline}
         </Text>
+
+        {e && (
+          <View style={{ gap: 6, marginTop: 10 }}>
+            <Field label="Tipo" value={e.type} textColor={t.text} mutedColor={t.muted} />
+            <Field label="Causa" value={e.cause} textColor={t.text} mutedColor={t.muted} />
+            <Field label="Carretera" value={e.road} textColor={t.text} mutedColor={t.muted} />
+            <Field
+              label="PK"
+              value={e.pkText ?? (e.pkKm !== undefined ? e.pkKm : null)}
+              textColor={t.text}
+              mutedColor={t.muted}
+            />
+            <Field label="Sentido" value={e.direction} textColor={t.text} mutedColor={t.muted} />
+            <Field
+              label="Orientación"
+              value={e.orientation}
+              textColor={t.text}
+              mutedColor={t.muted}
+            />
+            <Field label="Desde" value={e.startTime} textColor={t.text} mutedColor={t.muted} />
+            <Field label="Provincia" value={e.province} textColor={t.text} mutedColor={t.muted} />
+            <Field
+              label="Municipio"
+              value={e.municipality}
+              textColor={t.text}
+              mutedColor={t.muted}
+            />
+            <Field label="Fuente" value={e.source} textColor={t.text} mutedColor={t.muted} />
+
+            <Field
+              label="Coords"
+              value={`${e.lat.toFixed(5)}, ${e.lon.toFixed(5)}`}
+              textColor={t.text}
+              mutedColor={t.muted}
+            />
+            <Field
+              label="Severidad"
+              value={e.severity ?? null}
+              textColor={t.text}
+              mutedColor={t.muted}
+            />
+          </View>
+        )}
 
         <View style={styles.cardFooter}>
           {busy ? (
@@ -240,7 +336,7 @@ const BACKEND_BASE_URL = getBackendBaseUrl();
         </Pressable>
 
         <Text style={[styles.smallNote, { color: t.muted }]}>
-          En móvil físico usa la IP local del PC en BACKEND_BASE_URL.
+          Backend: {BACKEND_BASE_URL}
         </Text>
       </View>
     </View>
@@ -330,9 +426,9 @@ const styles = StyleSheet.create({
     opacity: 0.9,
   },
   alertText: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: "800",
-    lineHeight: 28,
+    lineHeight: 24,
   },
   cardFooter: {
     marginTop: 6,
